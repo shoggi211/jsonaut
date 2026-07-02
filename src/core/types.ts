@@ -33,6 +33,8 @@ export interface Env {
   X402_PAY_TO?: string;
   X402_NETWORK?: string;
   FACILITATOR_URL?: string;
+  CDP_API_KEY_ID?: string;
+  CDP_API_KEY_SECRET?: string;
   DEV_ALLOW_FREE_LLM?: string;
   FREE_DAILY_LIMIT?: string;
   PRICE_USD?: string;

@@ -1,3 +1,4 @@
+import { generateCdpJwt } from "./cdp.js";
 import type { Env, KVLike } from "../core/types.js";
 
 // USDC contract addresses per x402-supported network.
@@ -36,21 +37,52 @@ function x402Requirements(env: Env, resource: string) {
   };
 }
 
+/** The X-PAYMENT header is base64-encoded JSON of the payment payload. */
+function decodePaymentHeader(header: string): Record<string, unknown> | null {
+  try {
+    const bin = atob(header.trim());
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Call the x402 facilitator's /verify or /settle endpoint. When CDP credentials
+ * are present (mainnet), signs an EdDSA Bearer JWT; otherwise sends the request
+ * unauthenticated (works with the free base-sepolia facilitator).
+ */
 async function facilitatorCall(
   env: Env,
   endpoint: "verify" | "settle",
-  paymentHeader: string,
+  paymentPayload: Record<string, unknown>,
   requirements: Record<string, unknown>
 ): Promise<boolean> {
+  const base = (env.FACILITATOR_URL ?? "").replace(/\/$/, "");
+  const url = `${base}/${endpoint}`;
+
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (env.CDP_API_KEY_ID && env.CDP_API_KEY_SECRET) {
+    try {
+      const u = new URL(url);
+      const jwt = await generateCdpJwt(env.CDP_API_KEY_ID, env.CDP_API_KEY_SECRET, "POST", u.host, u.pathname);
+      headers["authorization"] = `Bearer ${jwt}`;
+    } catch {
+      // If JWT signing fails, the request proceeds unauthenticated and CDP will reject it.
+    }
+  }
+
   try {
-    const res = await fetch(`${env.FACILITATOR_URL}/${endpoint}`, {
+    const res = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ x402Version: 1, paymentHeader, paymentRequirements: requirements }),
+      headers,
+      body: JSON.stringify({ x402Version: 1, paymentPayload, paymentRequirements: requirements }),
     });
     if (!res.ok) return false;
-    const data = (await res.json()) as { isValid?: boolean; success?: boolean };
-    return endpoint === "verify" ? data.isValid === true : data.success === true;
+    const data = (await res.json()) as { isValid?: boolean; valid?: boolean; success?: boolean };
+    return endpoint === "verify" ? data.isValid === true || data.valid === true : data.success === true;
   } catch {
     return false;
   }
@@ -59,8 +91,8 @@ async function facilitatorCall(
 /**
  * Authorize a paid (LLM-fallback) call via x402 — the sole payment rail.
  *   1. DEV_ALLOW_FREE_LLM=true bypasses payment (local development only).
- *   2. An X-PAYMENT header is verified via the x402 facilitator; settlement
- *      happens only after a successful repair (see chargeOnSuccess).
+ *   2. An X-PAYMENT header is verified via the facilitator; settlement happens
+ *      only after a successful repair (see chargeOnSuccess).
  * Otherwise returns a 402 advertising the x402 payment requirement.
  */
 export async function authorizePaidCall(
@@ -91,14 +123,16 @@ export async function authorizePaidCall(
 
   const requirements = x402Requirements(env, resourceUrl);
   const paymentHeader = headers.get("x-payment");
-  if (paymentHeader && env.FACILITATOR_URL) {
-    const verified = await facilitatorCall(env, "verify", paymentHeader, requirements);
+  const paymentPayload = paymentHeader ? decodePaymentHeader(paymentHeader) : null;
+
+  if (paymentPayload && env.FACILITATOR_URL) {
+    const verified = await facilitatorCall(env, "verify", paymentPayload, requirements);
     if (verified) {
       return {
         authorized: true,
         via: "x402",
         chargeOnSuccess: async () => {
-          await facilitatorCall(env, "settle", paymentHeader, requirements);
+          await facilitatorCall(env, "settle", paymentPayload, requirements);
         },
       };
     }
