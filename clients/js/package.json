@@ -1,0 +1,38 @@
+{
+  "name": "jsonaut",
+  "version": "0.1.0",
+  "description": "Local-first JSON repair for AI-agent output. Fixes malformed JSON offline; escalates hard cases (and JSON Schema enforcement) to the Jsonaut API.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "json",
+    "json-repair",
+    "llm",
+    "ai-agent",
+    "mcp",
+    "openai",
+    "function-calling",
+    "structured-output",
+    "output-parser"
+  ],
+  "license": "MIT",
+  "homepage": "https://jsonaut.jsonaut-shaurya.workers.dev",
+  "dependencies": {
+    "jsonrepair": "^3.11.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

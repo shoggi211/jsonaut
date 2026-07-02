@@ -1,0 +1,31 @@
+# Cloudflare Workers deployment config.
+# Deploy with: npx wrangler deploy   (requires a Cloudflare account login)
+name = "jsonaut"
+main = "src/worker.ts"
+compatibility_date = "2026-06-01"
+
+# Uncomment and fill in after creating a KV namespace
+# (npx wrangler kv namespace create KV):
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "YOUR_KV_NAMESPACE_ID"
+
+[vars]
+# Free-tier daily request limit per IP.
+FREE_DAILY_LIMIT = "100"
+# Price per paid (LLM-fallback) call in USD.
+PRICE_USD = "0.01"
+# --- x402 payment rail ---
+# EVM wallet address that receives USDC (same address works on Base + Ethereum).
+X402_PAY_TO = "0x738f5e212c0c63669febda9b69e1d46dbc8d2ad8"
+# Testnet for now (free public facilitator). Switch to "base" for real money
+# once CDP facilitator credentials are set up.
+X402_NETWORK = "base-sepolia"
+FACILITATOR_URL = "https://x402.org/facilitator"
+# --- Set these as secrets, not vars (npx wrangler secret put <NAME>): ---
+# OPENROUTER_API_KEY     - enables the paid LLM-fallback repair tier (OpenRouter)
+# OPENROUTER_MODEL       - optional model override (default: a free ":free" model)
+# --- to go to MAINNET (real USDC): set X402_NETWORK = "base" and point
+#     FACILITATOR_URL at a mainnet facilitator (Coinbase CDP; requires creds). ---
+# --- optional: override the default credit packs (JSON array) ---
+# CREDIT_PACKS           - [{"id","label","amountCents","credits"}, ...]

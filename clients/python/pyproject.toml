@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jsonaut"
+version = "0.1.0"
+description = "Local-first JSON repair for AI-agent output. Fixes malformed JSON offline; escalates hard cases and JSON Schema enforcement to the Jsonaut API."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["json", "json-repair", "llm", "ai-agent", "mcp", "structured-output", "function-calling"]
+dependencies = []
+
+[project.optional-dependencies]
+# Better offline repair. Without it, only strict json.loads is tried locally
+# before falling back to the API.
+local = ["json-repair>=0.30"]
+
+[project.urls]
+Homepage = "https://jsonaut.jsonaut-shaurya.workers.dev"
+
+[tool.hatch.build.targets.wheel]
+packages = ["jsonaut"]
