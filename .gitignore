@@ -8,3 +8,4 @@ dist/
 .cdpenv
 .env
 *.log
+.adminenv

@@ -44,7 +44,7 @@ async function callModel(model: string, prompt: string, env: Env): Promise<Model
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+        authorization: `Bearer ${env.OPENROUTER_API_KEY?.trim()}`,
         // Optional but recommended by OpenRouter (used for their app rankings).
         "HTTP-Referer": env.OPENROUTER_SITE_URL || "https://jsonaut.dev",
         "X-Title": env.OPENROUTER_APP_NAME || "Jsonaut",

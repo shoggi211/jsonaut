@@ -38,6 +38,8 @@ export interface Env {
   DEV_ALLOW_FREE_LLM?: string;
   FREE_DAILY_LIMIT?: string;
   PRICE_USD?: string;
+  /** Gates the /stats and /dashboard usage endpoints. */
+  ADMIN_TOKEN?: string;
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   CREDIT_PACKS?: string;

@@ -55,6 +55,7 @@ export async function generateCdpJwt(
   path: string,
   expiresInSec = 120
 ): Promise<string> {
+  const kid = keyId.trim(); // secrets set via `wrangler secret put` can carry a trailing newline
   const key = await importEd25519PrivateKey(secretB64);
   const now = Math.floor(Date.now() / 1000);
 
@@ -62,9 +63,9 @@ export async function generateCdpJwt(
   crypto.getRandomValues(nonceBytes);
   const nonce = Array.from(nonceBytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
-  const header = { alg: "EdDSA", typ: "JWT", kid: keyId, nonce };
+  const header = { alg: "EdDSA", typ: "JWT", kid, nonce };
   const claims = {
-    sub: keyId,
+    sub: kid,
     iss: "cdp",
     aud: ["cdp_service"],
     nbf: now,

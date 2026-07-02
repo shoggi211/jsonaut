@@ -4,11 +4,10 @@ name = "jsonaut"
 main = "src/worker.ts"
 compatibility_date = "2026-06-01"
 
-# Uncomment and fill in after creating a KV namespace
-# (npx wrangler kv namespace create KV):
-# [[kv_namespaces]]
-# binding = "KV"
-# id = "YOUR_KV_NAMESPACE_ID"
+# KV backs durable free-tier rate limiting and usage metrics (/stats, /dashboard).
+[[kv_namespaces]]
+binding = "KV"
+id = "6a1bb72b36de43379182a3d2bcc78768"
 
 [vars]
 # Free-tier daily request limit per IP.
