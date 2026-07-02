@@ -1,4 +1,5 @@
 import { generateCdpJwt } from "./cdp.js";
+import { sha256Hex } from "../core/security.js";
 import type { Env, KVLike } from "../core/types.js";
 
 // USDC contract addresses per x402-supported network.
@@ -12,6 +13,9 @@ export interface PaymentAuth {
   via: "x402" | "dev" | null;
   /** Called only after a successful paid operation — failed repairs are never charged. */
   chargeOnSuccess: () => Promise<void>;
+  /** Called when the paid operation failed: releases the replay reservation so the
+   *  caller can retry with the same (uncharged) payment. */
+  releaseOnFailure?: () => Promise<void>;
   /** Populated when authorized=false: the HTTP 402 body to return. */
   paymentRequired?: { status: number; body: Record<string, unknown> };
 }
@@ -98,7 +102,7 @@ async function facilitatorCall(
 export async function authorizePaidCall(
   headers: Headers,
   env: Env,
-  _storage: KVLike,
+  storage: KVLike,
   resourceUrl: string
 ): Promise<PaymentAuth> {
   if (env.DEV_ALLOW_FREE_LLM === "true") {
@@ -125,14 +129,44 @@ export async function authorizePaidCall(
   const paymentHeader = headers.get("x-payment");
   const paymentPayload = paymentHeader ? decodePaymentHeader(paymentHeader) : null;
 
-  if (paymentPayload && env.FACILITATOR_URL) {
+  if (paymentPayload && paymentHeader && env.FACILITATOR_URL) {
     const verified = await facilitatorCall(env, "verify", paymentPayload, requirements);
     if (verified) {
+      // Replay protection: `verify` does not consume the authorization and the
+      // paid work runs before `settle`, so a single valid X-PAYMENT could be
+      // reused across concurrent calls. Reserve a per-authorization key so the
+      // same payment can't be spent twice. (KV read-modify-write is not fully
+      // atomic; a Durable Object would close the residual concurrent window.)
+      const dedupeKey = `pay:${await sha256Hex(paymentHeader)}`;
+      if (await storage.get(dedupeKey)) {
+        return {
+          authorized: false,
+          via: null,
+          chargeOnSuccess: async () => {},
+          paymentRequired: {
+            status: 402,
+            body: {
+              x402Version: 1,
+              error: "this payment authorization was already used; create a fresh payment",
+              accepts: [requirements],
+            },
+          },
+        };
+      }
+      await storage.put(dedupeKey, "1", { expirationTtl: 900 });
+
       return {
         authorized: true,
         via: "x402",
         chargeOnSuccess: async () => {
           await facilitatorCall(env, "settle", paymentPayload, requirements);
+        },
+        releaseOnFailure: async () => {
+          try {
+            await storage.delete(dedupeKey);
+          } catch {
+            /* best-effort */
+          }
         },
       };
     }

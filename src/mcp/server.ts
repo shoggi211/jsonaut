@@ -1,7 +1,15 @@
 import { repairPipeline, validateOnly } from "../core/pipeline.js";
 import { llmRepair } from "../core/llm.js";
 import { authorizePaidCall } from "../http/payment.js";
+import { MAX_INPUT_CHARS, MAX_SCHEMA_CHARS } from "../core/security.js";
 import type { Env, KVLike } from "../core/types.js";
+
+/** Reject oversized tool arguments (mirrors the HTTP API limits). Returns an error message or null. */
+function argTooLarge(input: unknown, schema: unknown): string | null {
+  if (typeof input === "string" && input.length > MAX_INPUT_CHARS) return `input too large (max ${MAX_INPUT_CHARS} characters)`;
+  if (schema && typeof schema === "object" && JSON.stringify(schema).length > MAX_SCHEMA_CHARS) return `schema too large (max ${MAX_SCHEMA_CHARS} characters)`;
+  return null;
+}
 
 /**
  * Minimal stateless MCP server over Streamable HTTP transport.
@@ -64,6 +72,9 @@ function toolText(payload: unknown, isError = false) {
 }
 
 async function callTool(name: string, args: Record<string, unknown>, ctx: McpContext) {
+  const tooLarge = argTooLarge(args.input, args.schema);
+  if (tooLarge) return toolText({ error: tooLarge }, true);
+
   if (name === "validate_json") {
     if (typeof args.input !== "string" || typeof args.schema !== "object" || args.schema === null) {
       return toolText({ error: "validate_json requires: input (string), schema (object)" }, true);
@@ -97,6 +108,7 @@ async function callTool(name: string, args: Record<string, unknown>, ctx: McpCon
     }
     const llm = await llmRepair(args.input, schema, ctx.env);
     if (!llm.ok) {
+      await auth.releaseOnFailure?.();
       return toolText({ valid: false, repaired: null, method: "failed", changes: result.changes, errors: [llm.error] }, true);
     }
     await auth.chargeOnSuccess();

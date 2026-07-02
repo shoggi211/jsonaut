@@ -10,7 +10,14 @@ import { recordEvent, readStats } from "../core/metrics.js";
 import { renderDashboard } from "./dashboard.js";
 import { DEMO_HTML } from "./demo.js";
 import { LLMS_TXT, OPENAPI_YAML } from "./staticContent.js";
+import { MAX_BODY_BYTES, MAX_INPUT_CHARS, MAX_SCHEMA_CHARS, constantTimeEqual } from "../core/security.js";
 import type { Env, KVLike } from "../core/types.js";
+
+/** Reject obviously-oversized bodies before we parse/process them (413). Returns null when ok. */
+function oversize(headers: Headers): number {
+  const len = Number(headers.get("content-length") ?? 0);
+  return Number.isFinite(len) ? len : 0;
+}
 
 function clientIp(headers: Headers): string {
   return headers.get("cf-connecting-ip") ?? headers.get("x-forwarded-for")?.split(",")[0].trim() ?? "local";
@@ -36,12 +43,27 @@ function statsAuthed(c: { env: Env; req: { query(k: string): string | undefined;
   const token = c.env.ADMIN_TOKEN?.trim();
   if (!token) return false;
   const given = (c.req.query("token") ?? c.req.header("x-admin-token"))?.trim();
-  return !!given && given === token;
+  return !!given && constantTimeEqual(given, token);
 }
 
 export const app = new Hono<{ Bindings: Env }>();
 
+// Never leak framework internals; always answer with JSON.
+app.onError((err, c) => {
+  console.error("unhandled error:", err instanceof Error ? err.message : String(err));
+  return c.json({ error: "internal error" }, 500);
+});
+app.notFound((c) => c.json({ error: "not found" }, 404));
+
 app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type", "X-PAYMENT", "Mcp-Protocol-Version"] }));
+
+// Baseline hardening headers on every response.
+app.use("*", async (c, next) => {
+  await next();
+  c.res.headers.set("X-Content-Type-Options", "nosniff");
+  c.res.headers.set("X-Frame-Options", "DENY");
+  c.res.headers.set("Referrer-Policy", "no-referrer");
+});
 
 app.get("/", (c) => c.html(DEMO_HTML));
 app.get("/llms.txt", (c) => c.text(LLMS_TXT));
@@ -52,6 +74,9 @@ app.post("/v1/repair", async (c) => {
   const env = c.env;
   const storage = getStorage(env);
 
+  if (oversize(c.req.raw.headers) > MAX_BODY_BYTES) {
+    return c.json({ error: `request body too large (max ${MAX_BODY_BYTES} bytes)` }, 413);
+  }
   let body: { input?: unknown; schema?: unknown; allow_llm_fallback?: unknown };
   try {
     body = await c.req.json();
@@ -61,10 +86,16 @@ app.post("/v1/repair", async (c) => {
   if (typeof body.input !== "string") {
     return c.json({ error: "input must be a string containing the (possibly broken) JSON" }, 400);
   }
+  if (body.input.length > MAX_INPUT_CHARS) {
+    return c.json({ error: `input too large (max ${MAX_INPUT_CHARS} characters)` }, 413);
+  }
   const schema =
     body.schema && typeof body.schema === "object" && !Array.isArray(body.schema)
       ? (body.schema as Record<string, unknown>)
       : undefined;
+  if (schema && JSON.stringify(schema).length > MAX_SCHEMA_CHARS) {
+    return c.json({ error: `schema too large (max ${MAX_SCHEMA_CHARS} characters)` }, 413);
+  }
   const allowLlm = body.allow_llm_fallback !== false; // default true per spec
 
   const rate = await checkRateLimit(storage, env, clientIp(c.req.raw.headers));
@@ -92,7 +123,8 @@ app.post("/v1/repair", async (c) => {
 
   const llm = await llmRepair(body.input, schema, env);
   if (!llm.ok) {
-    // Failed paid attempts are never charged.
+    // Failed paid attempts are never charged — release the replay reservation so the caller can retry.
+    await auth.releaseOnFailure?.();
     track(c, storage, ["requests", "llm_failed"]);
     return c.json({ valid: false, repaired: null, method: "failed", changes: result.changes, errors: [llm.error] });
   }
@@ -108,6 +140,9 @@ app.post("/v1/repair", async (c) => {
 });
 
 app.post("/v1/validate", async (c) => {
+  if (oversize(c.req.raw.headers) > MAX_BODY_BYTES) {
+    return c.json({ error: `request body too large (max ${MAX_BODY_BYTES} bytes)` }, 413);
+  }
   let body: { input?: unknown; schema?: unknown };
   try {
     body = await c.req.json();
@@ -116,6 +151,9 @@ app.post("/v1/validate", async (c) => {
   }
   if (typeof body.input !== "string" || !body.schema || typeof body.schema !== "object" || Array.isArray(body.schema)) {
     return c.json({ error: "requires input (string) and schema (object)" }, 400);
+  }
+  if (body.input.length > MAX_INPUT_CHARS || JSON.stringify(body.schema).length > MAX_SCHEMA_CHARS) {
+    return c.json({ error: `input or schema too large (max ${MAX_INPUT_CHARS}/${MAX_SCHEMA_CHARS} characters)` }, 413);
   }
   const storage = getStorage(c.env);
   const rate = await checkRateLimit(storage, c.env, clientIp(c.req.raw.headers));
@@ -136,11 +174,16 @@ app.get("/stats", async (c) => {
 
 app.get("/dashboard", async (c) => {
   if (!statsAuthed(c)) return c.text("unauthorized — append ?token=YOUR_ADMIN_TOKEN", 401);
+  // The page has no scripts and only inline styles; lock it down hard.
+  c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");
   return c.html(renderDashboard(await readStats(getStorage(c.env))));
 });
 
 app.post("/mcp", async (c) => {
   const env = c.env;
+  if (oversize(c.req.raw.headers) > MAX_BODY_BYTES) {
+    return c.json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "request too large" } }, 413);
+  }
   let body: unknown;
   try {
     body = await c.req.json();
