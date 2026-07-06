@@ -1,5 +1,7 @@
 import { repairPipeline, validateOnly } from "../core/pipeline.js";
-import { llmRepair } from "../core/llm.js";
+import { llmRepair, llmExtract } from "../core/llm.js";
+import { inferSchema } from "../core/schema-infer.js";
+import { extractDeterministic } from "../core/extract.js";
 import { authorizePaidCall } from "../http/payment.js";
 import { MAX_INPUT_CHARS, MAX_SCHEMA_CHARS } from "../core/security.js";
 import type { Env, KVLike } from "../core/types.js";
@@ -48,6 +50,33 @@ const TOOLS = [
       required: ["input", "schema"],
     },
   },
+  {
+    name: "extract_json",
+    description:
+      "Extract JSON embedded in arbitrary text — LLM prose, chat messages, logs, emails — then repair and validate it. Deterministic extraction is free. If no JSON can be located and allow_llm_fallback is true, a paid LLM extracts structured data from the text (requires x402 payment; charged only on success). Pass a JSON Schema to shape the output.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        input: { type: "string", description: "Text that may contain JSON" },
+        schema: { type: "object", description: "Optional JSON Schema the output must conform to" },
+        allow_llm_fallback: { type: "boolean", default: false, description: "Permit the paid LLM extraction tier" },
+      },
+      required: ["input"],
+    },
+  },
+  {
+    name: "infer_schema",
+    description:
+      "Infer a JSON Schema (draft 2020-12) from an example JSON value. Free and deterministic. Set as_samples=true when the input is an array of example objects of the same shape to merge them into one schema. Turns sample agent/tool output into a reusable schema.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        input: { type: "string", description: "A JSON value (or array of samples) to infer a schema from" },
+        as_samples: { type: "boolean", default: false, description: "Treat a top-level array as multiple samples of one shape" },
+      },
+      required: ["input"],
+    },
+  },
 ];
 
 interface McpContext {
@@ -81,6 +110,48 @@ async function callTool(name: string, args: Record<string, unknown>, ctx: McpCon
     }
     const result = validateOnly(args.input, args.schema as Record<string, unknown>);
     return toolText({ valid: result.valid, errors: result.errors });
+  }
+
+  if (name === "infer_schema") {
+    if (typeof args.input !== "string") {
+      return toolText({ error: "infer_schema requires: input (string)" }, true);
+    }
+    const parsed = repairPipeline(args.input);
+    if (!parsed.valid) {
+      return toolText({ ok: false, error: "could not parse input as JSON", details: parsed.errors }, true);
+    }
+    return toolText({ ok: true, schema: inferSchema(parsed.repaired, args.as_samples === true) });
+  }
+
+  if (name === "extract_json") {
+    if (typeof args.input !== "string") {
+      return toolText({ error: "extract_json requires: input (string)" }, true);
+    }
+    const schema = args.schema && typeof args.schema === "object" ? (args.schema as Record<string, unknown>) : undefined;
+    const result = extractDeterministic(args.input, schema);
+
+    if (result.valid || !result.llm_required || args.allow_llm_fallback !== true) {
+      return toolText(result, !result.valid && !result.llm_required);
+    }
+
+    const auth = await authorizePaidCall(ctx.headers, ctx.env, ctx.storage, ctx.resourceUrl);
+    if (!auth.authorized) {
+      return toolText(
+        {
+          ...result,
+          payment_required: auth.paymentRequired?.body,
+          hint: "No JSON found deterministically. LLM extraction needs payment: pay via x402 and retry with the X-PAYMENT header.",
+        },
+        true
+      );
+    }
+    const llm = await llmExtract(args.input, schema, ctx.env);
+    if (!llm.ok) {
+      await auth.releaseOnFailure?.();
+      return toolText({ valid: false, repaired: null, method: "failed", changes: result.changes, errors: [llm.error] }, true);
+    }
+    await auth.chargeOnSuccess();
+    return toolText({ valid: true, repaired: llm.value, method: "llm-extract", changes: llm.changes ?? [] });
   }
 
   if (name === "repair_json") {

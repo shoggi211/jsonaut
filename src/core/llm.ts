@@ -80,27 +80,19 @@ async function callModel(model: string, prompt: string, env: Env): Promise<Model
 }
 
 /**
- * Paid tier: ask a small/free model (via OpenRouter) to reconstruct valid JSON,
- * trying a list of free models and falling back on rate limits, then run the
- * result back through deterministic validation so we never return
+ * Shared paid-tier core: run a prompt through the free-model fallback list, parse
+ * the output defensively, and re-validate against the schema so we never return
  * schema-invalid output from a paid call.
  */
-export async function llmRepair(
-  input: string,
+async function completeToJson(
+  prompt: string,
   schema: Record<string, unknown> | undefined,
-  env: Env
+  env: Env,
+  successChange: string
 ): Promise<LlmRepairOutcome> {
   if (!env.OPENROUTER_API_KEY) {
-    return { ok: false, error: "LLM fallback is not configured on this server (missing OPENROUTER_API_KEY)" };
+    return { ok: false, error: "LLM tier is not configured on this server (missing OPENROUTER_API_KEY)" };
   }
-
-  const schemaPart = schema
-    ? `\nThe output MUST conform to this JSON Schema:\n${JSON.stringify(schema)}\n`
-    : "";
-  const prompt =
-    `The following text is malformed or schema-invalid JSON produced by a program. ` +
-    `Reconstruct the intended data and return ONLY the corrected JSON — no explanation, no markdown fences.${schemaPart}\n` +
-    `Malformed input:\n${input}`;
 
   let lastError = "no model was attempted";
 
@@ -128,11 +120,48 @@ export async function llmRepair(
 
     const checked = repairPipeline(candidate, schema);
     if (checked.valid) {
-      return { ok: true, value: checked.repaired, model, changes: ["reconstructed via LLM repair", ...checked.changes] };
+      return { ok: true, value: checked.repaired, model, changes: [successChange, ...checked.changes] };
     }
     lastError = `${model}: output failed schema validation: ${(checked.errors ?? []).join("; ")}`;
     // fall through to the next model
   }
 
-  return { ok: false, error: `LLM repair failed. Last error — ${lastError}` };
+  return { ok: false, error: lastError };
+}
+
+/**
+ * Paid tier: ask a small/free model to reconstruct valid JSON from malformed or
+ * schema-invalid input.
+ */
+export async function llmRepair(
+  input: string,
+  schema: Record<string, unknown> | undefined,
+  env: Env
+): Promise<LlmRepairOutcome> {
+  const schemaPart = schema ? `\nThe output MUST conform to this JSON Schema:\n${JSON.stringify(schema)}\n` : "";
+  const prompt =
+    `The following text is malformed or schema-invalid JSON produced by a program. ` +
+    `Reconstruct the intended data and return ONLY the corrected JSON — no explanation, no markdown fences.${schemaPart}\n` +
+    `Malformed input:\n${input}`;
+  const out = await completeToJson(prompt, schema, env, "reconstructed via LLM repair");
+  return out.ok ? out : { ...out, error: `LLM repair failed. Last error — ${out.error}` };
+}
+
+/**
+ * Paid tier: extract structured JSON from arbitrary text (prose, logs, emails),
+ * optionally conforming to a JSON Schema. Used when deterministic extraction can
+ * find no JSON to salvage.
+ */
+export async function llmExtract(
+  text: string,
+  schema: Record<string, unknown> | undefined,
+  env: Env
+): Promise<LlmRepairOutcome> {
+  const schemaPart = schema ? `\nReturn JSON conforming to this JSON Schema:\n${JSON.stringify(schema)}\n` : "";
+  const prompt =
+    `Extract the structured data from the text below and return ONLY valid JSON — ` +
+    `no explanation, no markdown fences. If a value is absent, omit it or use null.${schemaPart}\n` +
+    `Text:\n${text}`;
+  const out = await completeToJson(prompt, schema, env, "extracted via LLM");
+  return out.ok ? out : { ...out, error: `LLM extraction failed. Last error — ${out.error}` };
 }
